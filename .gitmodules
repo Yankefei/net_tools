@@ -1,0 +1,3 @@
+[submodule "3rd/the_essence_of_computing"]
+	path = 3rd/the_essence_of_computing
+	url = https://github.com/Yankefei/the_essence_of_computing.git
