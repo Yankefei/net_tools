@@ -1,6 +1,8 @@
 #include "stream.h"
 
 #include "net_server.h"
+#include <thread>
+#include <chrono>
 
 class TestServer : public net_tools::NetServerSpi
 {
@@ -42,6 +44,16 @@ private:
 
 int main()
 {
+
+    TestServer server;
+
+    server.Init();
+
+    int val = 10;
+    while(val -- > 0)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 
     return 0;
 }

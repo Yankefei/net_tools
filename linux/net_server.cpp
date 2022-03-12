@@ -4,7 +4,7 @@
 namespace net_tools
 {
 
-NetServerApi* CreateNetServerApi()
+NetServerApi* NetServerApi::CreateNetServerApi()
 {
     Server* impl_ptr = new Server();
     return static_cast<NetServerApi*>(impl_ptr);
