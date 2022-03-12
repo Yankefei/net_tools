@@ -21,5 +21,5 @@ set(CMAKE_CXX_FLAGS "-g")
 set(PROJECT_BINARY_DIR ./build)
 
 #添加子目录
-add_subdirectory(src)
-#add_subdirectory(test)
+add_subdirectory(linux)
+add_subdirectory(test)
