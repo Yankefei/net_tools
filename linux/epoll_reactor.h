@@ -3,6 +3,7 @@
 
 #include "stream.h"
 #include "general.h"
+#include "epoll_reactor_context.h"
 
 #include "boost/asio/detail/eventfd_select_interrupter.hpp"
 
@@ -20,7 +21,10 @@ namespace net_tools
 class EpollReactor
 {
 public:
-    EpollReactor() = default;
+    EpollReactor(int thread_num_for_queue)
+        : thread_num_(thread_num_for_queue)
+    {}
+
     ~EpollReactor()
     {
         if (epoll_fd_ != -1)
@@ -33,6 +37,12 @@ public:
     {
         do
         {
+            for (int i = 0; i < max_ops; i++)
+                op_queue_[i] = tools::create_mpmc_queue<OpItem>(4096);
+
+            for (int i = 0; i < thread_num_; i++)
+                thread_list_[i] = std::thread(std::bind(EpollReactor::pop_queue, this));
+
             epoll_fd_ = epoll_create(EPOLL_MAX_NUM);
             if (epoll_fd_ < 0)
                 return false;
@@ -47,6 +57,48 @@ public:
         return true;
     }
 
+    bool release()
+    {
+        for (int i = 0; i < thread_num_; i++)
+        {
+            if (thread_list_[i].joinable())
+                thread_list_[i].join();
+        }
+
+        for (int i = 0; i < max_ops; i++)
+            tools::free_mpmc_queue(op_queue_[i]);
+
+        interrupt();
+        if (thread_.joinable())
+            thread_.join();
+    }
+
+    tools::MPMCQueue<OpItem>** get_mpmc_queue_ptr()
+    {
+        return op_queue_;
+    }
+
+    /*
+        将errno设置为线程局部变量是个不错的主意，事实上，GCC中就是这么干的。他保证了线程之间的
+        错误原因不会互相串改，当你在一个线程中串行执行一系列过程，那么得到的errno仍然是正确的。
+        
+        显然，errno实际上，并不是我们通常认为的是个整型数值，而是通过整型指针来获取值的。这个整
+        型就是线程安全的。
+    */
+    int register_descriptor(int descriptor, EpollContext* descriptor_data);
+
+private:
+    void run();
+
+    void add_timer_opt();
+
+    void add_interrupt_opt()
+    {
+        epoll_event ev = { 0, { 0 } };
+        ev.events = EPOLLIN | EPOLLERR | EPOLLET;
+        ev.data.ptr = &interrupter_;
+        modify_epoll_event(interrupter_.read_descriptor(), EPOLL_CTL_ADD, &ev);
+    }
 
     bool modify_epoll_event(int socket, int op,  struct epoll_event* event)
     {
@@ -58,72 +110,19 @@ public:
         return true;
     }
 
-    bool release()
-    {
-        interrupt();
-        if (thread_.joinable())
-            thread_.join();
-    }
-
-private:
-    void run()
-    {
-        int32_t timer_index = 0;
-        struct epoll_event array[128];
-        int array_len = sizeof(array)/sizeof(struct epoll_event);
-        while(true)
-        {
-            int num_event = epoll_wait(epoll_fd_, array, array_len, -1);
-            for (int i = 0; i < array_len; ++i)
-            {
-                void* ptr = array[i].data.ptr;
-                if (ptr == &interrupter_)
-                {
-                    stream << "interrupter, stop epoll wait" << std::endl;
-                    return;
-                }
-                else if (ptr == &timer_fd_)
-                {
-                    uint64_t exp;
-                    read(timer_fd_, &exp, sizeof(uint64_t));  // 需要读取timer_fd的数据，才能继续触发
-                    stream <<"index: "<< ++timer_index  << ", on timer ...thread_id: "<< GET_THREAD_ID << std::endl;
-                }
-            }
-        }
-    }
-
-    void add_timer_opt()
-    {
-        timer_fd_ = timerfd_create(CLOCK_REALTIME, TFD_CLOEXEC);
-        epoll_event ev = { 0, { 0 } };
-        ev.events = EPOLLIN | EPOLLERR | EPOLLET;
-        ev.data.ptr = &timer_fd_;
-
-        struct timespec it_value{0, 0};
-        clock_gettime(CLOCK_REALTIME, &it_value);
-        it_value.tv_sec += 1;
-        itimerspec inter_time{{1, 0}, it_value};  // 设置1s的定时周期
-        if (timerfd_settime(timer_fd_, TFD_TIMER_ABSTIME, &inter_time, nullptr) < 0)
-        {
-            stream << "settime failed" << std::endl;
-            return;
-        }
-
-        modify_epoll_event(timer_fd_, EPOLL_CTL_ADD, &ev);
-    }
-
-    void add_interrupt_opt()
-    {
-        epoll_event ev = { 0, { 0 } };
-        ev.events = EPOLLIN | EPOLLERR | EPOLLET;
-        ev.data.ptr = &interrupter_;
-        modify_epoll_event(interrupter_.read_descriptor(), EPOLL_CTL_ADD, &ev);
-    }
-
     // 退出函数
     void interrupt()
     {
         interrupter_.interrupt();
+    }
+
+    void pop_queue()
+    {
+        while(UNLIKELY(ACCESS_ONCE(stop_flag_)))
+        {
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
     }
 
 private:
@@ -133,7 +132,11 @@ private:
 
     boost::asio::detail::eventfd_select_interrupter  interrupter_;
 
-    std::thread thread_;
+    std::thread thread_;           // for epoll_wait
+
+    int thread_num_;
+    std::thread*      thread_list_;  // for queue
+    tools::MPMCQueue<OpItem>* op_queue_[max_ops]; // 多种类型的MPMC队列
 };
 
 }

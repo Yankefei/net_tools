@@ -4,8 +4,10 @@
 #include "stream.h"
 #include "epoll_reactor.h"
 
+#include <thread>
+#include <chrono>
 #include <functional>
-#include "lock_free_container/mpmc_queue.h"
+#include "epoll_reactor_context.h"
 
 namespace net_tools
 {
@@ -13,64 +15,51 @@ namespace net_tools
 /*
     epoll 的管理类
     epoll_num  参数表示初始化多少个epoll用于监控socket
-    thread_num 参数表示使用多少线程来处理异步的读写
+    thread_num 参数表示使用多少线程来处理一个epoll所监控的的异步事件
 */
-
-enum class EventType
-{
-    WriteEvent,
-    ReadEvent,
-
-};
 
 class EpollMgr
 {
 public:
-    EpollMgr(int epoll_num, int thread_num) : epoll_num_(epoll_num)
+    EpollMgr(int epoll_num, int thread_num_for_epoll)
+        : epoll_num_(epoll_num)
     {
-        reactor_ = new EpollReactor[epoll_num_];
+        reactor_list_.reset(new EpollReactor[epoll_num_](thread_num_for_epoll));
     }
 
     ~EpollMgr()
     {
-        if (reactor_)
-            delete[] reactor_;
     }
 
     bool init()
     {
         for (int i = 0; i < epoll_num_; i++)
         {
-            if (!reactor_[i].init())
+            if (!reactor_list_[i].init())
                 return false;
         }
     }
 
     void release()
     {
+        stop_flag_ = true;
         for (int i = 0; i < epoll_num_; i++)
         {
-            reactor_[i].release();
+            reactor_list_[i].release();
         }
     }
 
-    void pop_queue()
+    EpollReactor* get_epoll_reactor()
     {
+        static int reactor_index = 0;
+        return &reactor_list_[reactor_index++ % epoll_num_];
     }
 
 private:
-    struct EpollContext
-    {
-        //tools::MPMCQueue<> queue_;
-    };
+    std::unique_ptr<EpollReactor[]>  reactor_list_;
 
-    struct epoll_context
-    {
-        struct epoll_event event_;
-    }; 
-
-    EpollReactor*     reactor_;
     int epoll_num_;
+    bool stop_flag_{false};
 };
 
 }
